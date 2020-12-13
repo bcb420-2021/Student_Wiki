@@ -1,2 +1,2 @@
 # Student_Wiki
-main student wiki pages for BCB420-2021
+course student wiki for bcb420-2021 - https://github.com/bcb420-2021/Student_Wiki/wiki
