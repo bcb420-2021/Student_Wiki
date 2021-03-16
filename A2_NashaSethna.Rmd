@@ -1,0 +1,404 @@
+---
+title: "BCB420 A2"
+author: "Nasha Sethna"
+date: "March 16, 2021"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_depth: 2
+---
+
+# Introduction to Data
+
+## Overview
+
+**This is an RNA sequencing dataset comparing celiac disease patients to healthy controls.**
+
+**Link & GSE Accession :** [GSE146190](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE146190)
+
+**Submission date:** Mar 02 2020
+
+**Last update date:** Feb 16 2021
+
+**Samples and Overall design (from GEO):** Upper colonoscopy (duodenal) biopsies from 5 control(CTR) and 11 celiac disease patients (PED) were taken, total RNA was extracted and RNA-sequencing was performed
+
+**Note:** As shown in the workflow, the samples only included 5 healthy controls and **6 CeD patients**.  This was confirmed by the paper which cites the dataset.
+
+**Paper associated with dataset:**
+[Systematic Prioritization of Candidate Genes in Disease Loci Identifies TRAFD1 as a Master Regulator of IFNγ Signaling in Celiac Disease](https://pubmed.ncbi.nlm.nih.gov/33569077/)
+
+## Platform Info
+
+**Platform title :** Illumina HiSeq 2500 (Homo sapiens)
+
+**Submission data :** Mar 14 2013
+
+**Last update data :** Mar 27 2019
+
+**Organims :** Homo sapiens (taxid: 9606)
+
+## Data Cleaning & Normalization Info
+
+**Gene count of initial dataset:** 45728
+
+**Gene count after cleaning, normalization, and identifier mapping:** 15781
+
+**MDS Plot of data to visualize differences after normalization**
+```{r, warning=FALSE,message=FALSE}
+normalized_count_data <- read.table(file=file.path("./GSE146190_finalized_normalized_counts.txt"), header = TRUE,sep = "\t", stringsAsFactors = FALSE, check.names=FALSE)
+
+heatmap_matrix <- normalized_count_data[, 3:ncol(normalized_count_data)]
+rownames(heatmap_matrix) <- normalized_count_data$hgnc_symbol
+colnames(heatmap_matrix) <- colnames(normalized_count_data[, 3:ncol(normalized_count_data)])
+
+library(limma)
+limma::plotMDS(heatmap_matrix, col = rep(c("darkgreen","blue"),10), main = "Celiac disease (PED) vs Healthy patients (CTR)" )
+```
+There is a clear delineation, where the PED patients are shifted to the left and CTR patients are shifted to the right.  This provides a good baseline for the differential gene expression analysis.
+
+
+# Differential Gene Expression Analysis
+
+## Initial Heatmaps
+
+**First things first, we need to load the data:**
+This is is a data frame with a first column of ensembl gene IDs, second column of hgnc symbols, and the other 11 columns the normalized cpm patient data 
+
+```{r, warning=FALSE,message=FALSE}
+normalized_count_data <- read.table(file=file.path("./GSE146190_finalized_normalized_counts.txt"), header = TRUE,sep = "\t", stringsAsFactors = FALSE, check.names=FALSE)
+
+```
+
+Let's take a look...
+```{r, warning=FALSE,message=FALSE}
+library(knitr)
+kable(normalized_count_data[1:5,1:5], type="html")
+```
+Looks good.
+
+Next we have to create a matrix in order to conduct differential gene expression analysis.  The first two columns should be excluded because they have the ensembl IDs and symbols.  In this case, I'm going to put the row names of the matrix as the hgnc symbols because they seem more comprehensive than the ensembl gene IDs.
+
+```{r, warning=FALSE,message=FALSE}
+heatmap_matrix <- normalized_count_data[, 3:ncol(normalized_count_data)]
+rownames(heatmap_matrix) <- normalized_count_data$hgnc_symbol
+colnames(heatmap_matrix) <- colnames(normalized_count_data[, 3:ncol(normalized_count_data)])
+```
+
+First, create a preliminary scaled heatmap
+
+```{r, warning=FALSE,message=FALSE}
+library(ComplexHeatmap)
+library(circlize)
+heatmap_matrix <- t(scale(t(heatmap_matrix)))
+if(min(heatmap_matrix) == 0){
+heatmap_col = colorRamp2(c( 0, max(heatmap_matrix)),
+c( "white", "red"))
+} else {
+heatmap_col = colorRamp2(c(min(heatmap_matrix), 0,
+max(heatmap_matrix)), c("blue", "white", "red"))
+}
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix),
+show_row_dend = TRUE,show_column_dend = TRUE,
+col=heatmap_col,show_column_names = TRUE,
+show_row_names = FALSE,show_heatmap_legend = TRUE)
+
+current_heatmap
+```
+
+I can't really tell if there are clear differences between chunks of **genes** in the control vs celiac disease samples.  The controls and the celiac disease patients cluster together in the **column dendrogram**, so that's promising.
+
+
+## Model
+
+For this dataset, we don't have another variable to control for besides cell type (celiac disease/control).  The patients for each sample are different but I can't create a DGE list with this because I get this error message: No residual df: setting dispersion to NA. I notice in general that I cannot use a model that has the same number of "groups" as the dataset has samples.  If I were to group by patient, I would have 11 groups of 11 samples, which wouldn't work.  Instead, I am grouping by the cell type variable.  The grouping my **model** is based on is shown below.
+
+```{r, warning=FALSE,message=FALSE}
+#Create samples table for the MODEL
+#I should split by "_" because my sample names are PED_48 and CTR_12 (2 tokens)
+samples <- data.frame(lapply(colnames(normalized_count_data)[3:13], FUN=function(x){unlist(strsplit(x, split = "\\_"))[c(1,2)]}))
+colnames(samples) <- colnames(normalized_count_data)[3:13]
+rownames(samples) <- c("cell_type","patients")
+samples <- data.frame(t(samples))
+
+```
+
+## Limma Analysis
+
+First, the model design
+```{r, warning=FALSE,message=FALSE}
+model_design <- model.matrix(~ samples$cell_type )
+library(Biobase)
+expressionMatrix <- as.matrix(normalized_count_data[,3:13])
+rownames(expressionMatrix) <- normalized_count_data$ensembl_gene_id
+colnames(expressionMatrix) <- colnames(normalized_count_data)[3:13]
+minimalSet <- ExpressionSet(assayData=expressionMatrix) #biobase function
+#Fit our data to the above model
+fit <- lmFit(minimalSet, model_design)
+```
+
+Create a top hits table with hgnc symbols
+```{r, warning=FALSE,message=FALSE}
+fit2 <- eBayes(fit,trend=TRUE)
+topfit <- topTable(fit2,
+coef=ncol(model_design),
+adjust.method = "BH",
+number = nrow(expressionMatrix))
+#merge hgnc names to topfit table
+output_hits <- merge(normalized_count_data[,1:2],
+topfit,
+by.y=0,by.x=1,
+all.y=TRUE)
+#sort by pvalue
+output_hits <- output_hits[order(output_hits$P.Value),]
+```
+
+Check P-values and adjusted P-values of the limma analysis.  For adjusted P-values and multiple hypothesis testing, I'm going to use BH because it's not as stringent as Bonferroni and is commonly used.
+
+```{r, warning=FALSE,message=FALSE}
+#How many gene pass the threshold p-value < 0.05?
+length(which(output_hits$P.Value < 0.05)) #5425
+
+#How many genes pass correction?
+length(which(output_hits$adj.P.Val < 0.05)) #2797
+```
+
+So 2797 genes pass correction with the limma analysis.  This is promising.  I'm going to plot a heatmap with the most significant genes here and see if they are differentially expressed.
+
+```{r, warning=FALSE,message=FALSE}
+top_hits <- output_hits$hgnc_symbol[output_hits$adj.P.Val<0.05]
+heatmap_matrix_tophits <- t(
+scale(t(heatmap_matrix[
+which(rownames(heatmap_matrix) %in% top_hits),])))
+if(min(heatmap_matrix_tophits) == 0){
+heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)),
+c( "white", "red"))
+} else {
+  heatmap_col = colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("blue", "white", "red"))
+}
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+cluster_rows = TRUE,
+cluster_columns = TRUE,
+show_row_dend = TRUE,
+show_column_dend = TRUE,
+col=heatmap_col,
+show_column_names = TRUE,
+show_row_names = FALSE,
+show_heatmap_legend = TRUE)
+
+current_heatmap
+```
+There is a good amount of differential gene expression here between the two cell types.  Column dendrograms correlate and so do the row dendrograms.  This is promising, however I'm going to do an **edgeR** analysis as well.
+
+
+## EdgeR Analysis
+
+I only have one factor (cell type) differing between my samples and so I've decided to use the exact test.  I looked up a tutorial for it here: [Exact test tutorial](https://www.r-bloggers.com/2020/09/exact-tests-and-plots-with-edger-basic-differential-expression-analysis/).  They don't use a model when they calculate dispersion, and I emailed Professor Isserlin about this and she said it was fine, so I didn't either.
+
+```{r, warning=FALSE,message=FALSE}
+#create the DGE list
+library(edgeR)
+#Try the exact test without the model design
+filtered_data_matrix <- as.matrix(normalized_count_data[,3:13])
+rownames(filtered_data_matrix) <- normalized_count_data$hgnc_symbol
+d = DGEList(counts=filtered_data_matrix, group=samples$cell_type)
+#Estimate Dispersion
+d <- estimateDisp(d)
+
+#Perform an exact test for PED vs CTR
+tested <- exactTest(d, pair=c("CTR", "PED"))
+topTags(tested)
+#Create results table of DE genes
+exact_output_hits <- topTags(tested, n=nrow(tested$table))$table
+```
+
+Checking genes by significance...
+```{r}
+#How many gene pass the threshold p-value < 0.05?
+length(which(exact_output_hits$PValue < 0.05)) #4755
+#How many genes pass correction?
+length(which(exact_output_hits$FDR < 0.05)) #2926
+```
+
+There are a good amount of genes that pass correction here (about 200 more than limma).  Now, I'm going to check what the heatmap looks like
+
+```{r, warning=FALSE,message=FALSE}
+#Let's see what the heatmap looks like
+library(data.table)
+#Make the rownames of hgnc_symbol a column of their own
+exact_output_hits<-setDT(exact_output_hits, keep.rownames = "hgnc_symbol")[]
+
+#Create top hits list
+top_hits <- exact_output_hits$hgnc_symbol[which(exact_output_hits$FDR < 0.05)]
+heatmap_matrix_tophits <- t(scale(t(heatmap_matrix[which(rownames(heatmap_matrix) %in% top_hits),])))
+if(min(heatmap_matrix_tophits) == 0){
+heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)),
+c( "white", "red"))
+} else {
+  heatmap_col = colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("blue", "white", "red"))
+}
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+cluster_rows = TRUE,
+cluster_columns = TRUE,
+show_row_dend = TRUE,
+show_column_dend = TRUE,
+col=heatmap_col,
+show_column_names = TRUE,
+show_row_names = FALSE,
+show_heatmap_legend = TRUE,
+)
+
+current_heatmap
+```
+This heatmap looks promising as well in terms of the differential expression between PED and CTR patients as well as the clustered genes being up and downregulated within each sample.  In order to determine, how the models compare I'm going to do a comparison.
+
+
+# Comparison of Two Models
+
+I'm going to use corrected P-values to compare the models.
+
+```{r, warning=FALSE,message=FALSE}
+exact_model_pvalues <- data.frame(
+hgnc_symbol = exact_output_hits$hgnc_symbol,
+exact_patient_pvalue=exact_output_hits$FDR)
+limma_model_pvalues <- data.frame(
+hgnc_symbol = output_hits$hgnc_symbol,
+limma_patient_pvalue = output_hits$adj.P.Val)
+two_models_pvalues <- merge(exact_model_pvalues,
+limma_model_pvalues,
+by.x=1,by.y=1)
+two_models_pvalues$colour <- "black"
+two_models_pvalues$colour[two_models_pvalues$exact_patient_pvalue
+<0.05] <- "orange"
+two_models_pvalues$colour[two_models_pvalues$limma_patient_pvalue
+<0.05] <- "blue"
+two_models_pvalues$colour[two_models_pvalues$exact_patient_pvalue
+<0.05 & two_models_pvalues$limma_patient_pvalue < 0.05] <- "red"
+
+length(two_models_pvalues$hgnc_symbol[which(two_models_pvalues$exact_patient_pvalue
+<0.05 & two_models_pvalues$limma_patient_pvalue < 0.05)])
+
+length(two_models_pvalues$hgnc_symbol[which(two_models_pvalues$exact_patient_pvalue
+<0.05 & two_models_pvalues$limma_patient_pvalue < 0.05)])
+
+plot(two_models_pvalues$exact_patient_pvalue,
+two_models_pvalues$limma_patient_pvalue,
+col = two_models_pvalues$colour,
+xlab = "Exact Patient model adjusted p-values",
+ylab ="Limma Patient model adjusted p-values",
+main="Exact vs Limma")
+```
+
+## Decision of which model to use:
+
+After consulting with the professor, I've decided to use the results from the exact test using edgeR because edgeR is optimized for RNA sequencing data.
+
+### Upregulated and downregulated genes in exact test
+
+```{r, warning=FALSE,message=FALSE}
+#How many genes are upregulated?
+length(which(exact_output_hits$FDR < 0.05
+& exact_output_hits$logFC > 0)) #2091
+
+#More stringent...
+length(which(exact_output_hits$FDR < 0.01
+& exact_output_hits$logFC > 0)) #1252
+
+#How many genes are down regulated?
+length(which(exact_output_hits$FDR < 0.05
+& exact_output_hits$logFC < 0)) #835
+
+#More stringent...
+length(which(exact_output_hits$FDR < 0.01
+& exact_output_hits$logFC < 0)) #527
+
+```
+For my ORA, I'm going to use the **more stringent FDR value (< 0.01)** to obtain more specific biological processes when I do the enrichment analysis.
+
+# Thresholded ORA
+
+First I'm creating a ranked list of genes and finding the upregulated and downregulated ones
+```{r, warning=FALSE,message=FALSE}
+#Already have the hgnc_symbols in the exact_output_hits table, so let's just redefine it to work with the code from the lecture
+exact_output_hits_withgn <- exact_output_hits
+
+#Create a ranking using the product of the negative log of the significance and log fold change
+exact_output_hits_withgn[,"rank"] <- -log(exact_output_hits_withgn$FDR, base=10)* sign(exact_output_hits_withgn$logFC)
+
+#Sort the list by rank
+exact_output_hits_withgn <- exact_output_hits_withgn[order(exact_output_hits_withgn$rank), ]
+
+#List of upregulated genes (should get 1252)
+upregulated_genes <- exact_output_hits_withgn$hgnc_symbol[
+which(exact_output_hits_withgn$FDR < 0.01
+& exact_output_hits_withgn$logFC > 0)]
+
+#List of downregulated genes (should get 527)
+downregulated_genes <- exact_output_hits_withgn$hgnc_symbol[
+which(exact_output_hits_withgn$FDR < 0.01
+& exact_output_hits_withgn$logFC < 0)]
+```
+In total there are **1252 upregulated genes** and **527 downregulated genes**
+
+
+Creating txt files for up and downregulated genes (commented out)...
+```{r, warning=FALSE,message=FALSE}
+#Upregulated genes
+#write.table(x=upregulated_genes,
+#file=file.path("/home/rstudio/BCB420","ced_upregulated_genes.txt"),sep = "\t", #row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+#Downregulated genes
+#write.table(x=downregulated_genes, #file=file.path("/home/rstudio/BCB420","ced_downregulated_genes.txt"), sep = #"\t", row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+#Ranked genes file
+#write.table(x=data.frame(genename= exact_output_hits_withgn$hgnc_symbol, F_stat #= exact_output_hits_withgn$rank), #file=file.path("/home/rstudio/BCB420","ced_ranked_genelist.txt"), sep = "\t", #row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+#Differentially expressed genes
+all_differential_genes <- exact_output_hits_withgn$hgnc_symbol[
+which(exact_output_hits_withgn$FDR < 0.01)] #1779
+#write.table(x=all_differential_genes, #file=file.path("/home/rstudio/BCB420","ced_differential_genes.txt"), sep = "\t", #row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+```
+
+## Results of ORA using g:Profiler
+
+**Methods:**
+I used g:Profiler and narrowed down the databases to only use GO biological processes, No electronic GO annotatios, Reactome, and Wiki Pathways.  Using only these pathways ensured I would narrow the enriched biological processes to the most significant.
+
+In advanced options, all defaults were used except checking all results and BH FDR significance threshold used, because it is less stringent than Bonferroni.  Any duplicated ensembl IDs that were found were rerun with the gene the most GO annotations.  Lastly, term size was limited to 200 for more specific results to obtain more specific term names.
+
+**I've summarized the results below**
+
+```{r}
+ORA_Results <- data.frame(Geneset = c("Upregulated", "Downregulated", "All Differentially Expressed"), Number = c(1252, 527, 1779), Process = c("Mitotic sister chromatid separation", "Fatty acid catabolism", "Mitotic sister chromatid separation"), FDR = c("<0.01", "<0.01", "<0.01"), P.adj = c(10e-32, 10e-15, 10e-24))
+colnames(ORA_Results) <- c("Geneset", "Number of Genes", "Main Enriched Process", "FDR Threshold (from DE analysis)", "Approximate Adjusted P-val (from G:profiler)")
+
+ORA_Results
+```
+
+# Interpretation
+
+**1. Do the over-representation results support conclusions or mechanism discussed in the original paper?**
+No, there is no mention of genes involving mitosis or fatty acid catabolism.  This may be because the paper that cites this dataset does not only use this dataset but two more RNA sequencing datasets from intestinal T-cells, which, from the content of the paper, seem to be pervade most of their results.
+
+**2. Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.**
+
+Based on other sources, the upregulated gene enrichment analysis actually does make sense because celiac disease is associated with an "increased mitotic index".  Sister chromatid separation is a part of mitosis, so this explains that enriched process.
+
+For the downregulated genes and fatty acid catabolism, it is worth noting that another enriched process associated with this is carboxylic acid catabolism and gluten has carboxylic acid groups on it.  From this we can infer a potential downregulation of gluten catabolism, which makes sense because celiac disease is a gluten allergy that does not allow it to be digested and provokes an immune response.
+
+# References
+
+**Paper associated with data:** van der Graaf, A., Zorro, M. M., Claringbould, A., Võsa, U., Aguirre-Gamboa, R., Li, C., Mooiweer, J., Ricaño-Ponce, I., Borek, Z., Koning, F., Kooy-Winkelaar, Y., Sollid, L. M., Qiao, S. W., Kumar, V., Li, Y., Franke, L., Withoff, S., Wijmenga, C., Sanna, S., Jonkers, I., … BIOS Consortium (2021). Systematic Prioritization of Candidate Genes in Disease Loci Identifies TRAFD1 as a Master Regulator of IFNγ Signaling in Celiac Disease. Frontiers in genetics, 11, 562434. https://doi.org/10.3389/fgene.2020.562434
+
+**Sources used for interpretation (Q2):**
+
+Chibbar, R., & Dieleman, L. A. (2019). The Gut Microbiota in Celiac Disease and probiotics. Nutrients, 11(10), 2375. https://doi.org/10.3390/nu11102375
+
+https://www.sciencedirect.com/topics/immunology-and-microbiology/coeliac-disease
+
+**R Packages used:** knitr, ComplexHeatmap, circlize, limma, Biobase, edgeR, data.table
+
